@@ -1,7 +1,7 @@
 ---
 name: goal
 description: Use when the user says "/goal" or wants to autonomously pursue a durable objective — equivalent to Codex /goal. Decomposes goals into milestones, dispatches agents, and enforces independent verification before marking complete.
-version: 2.6.0
+version: 2.7.0
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -1852,6 +1852,197 @@ for i in range(len(runs) - window):
 - `d8_after - d8_before ≥ 0` → 棘轮保留
 - `d8_after - d8_before < 0` → 立即 alert，等用户决策
 - `d8_after - d8_before ≥ +1` → 标记"显著改进"，优先复用此改动模式
+
+---
+
+### 6.1.9 Codex Memories — 双阶段记忆提取
+
+**背景：** Codex 在 `/goal` 长任务中维护了跨 session 的 semantic memory，防止同一类错误重复出现。
+
+**Phase 1 — Per-thread Extraction（每条 TASK 完成后）：**
+
+```python
+# 每次 delegate_task 返回后，立即提取关键记忆
+def extract_thread_memory(task_result):
+    """
+    从单个 task 的执行结果中提取可复用的 pattern/failure。
+    存储到 .autonomous/<task-name>/session-memory.jsonl
+    """
+    memory = {
+        "task_name": task_result["task_name"],
+        "timestamp": now_iso(),
+        "what_worked": task_result["effective_patterns"],    # 哪些方法有效
+        "what_failed": task_result["failed_attempts"],       # 哪些方法失败
+        "key_decisions": task_result["architectural_decisions"],  # 关键决策
+        "implicit_hints": task_result["warnings_ignored"],   # 当时忽略的警告（回头看是什么）
+        "agent_used": task_result["agent"],
+        "d_score": task_result["d_score"],
+    }
+    append_to_jsonl(memory_path, memory)
+```
+
+**Phase 2 — Global Consolidation（Phase 6.1 结束时）：**
+
+```python
+# 当 run 结束时，汇总所有 thread memories → 全局 learnings
+def consolidate_memories(run_id):
+    """
+    读取所有 session-memory.jsonl，提取跨任务的全局 pattern，
+    追加到 ~/.hermes/goal-runs/global-learnings.jsonl
+    """
+    session_memories = read_all_jsonl(f"~/.hermes/goal-runs/{run_id}/session-memory.jsonl")
+
+    # 聚类：相同错误模式出现 ≥2 次 → 全局警告
+    from collections import Counter
+    failure_patterns = Counter(m["what_failed"] for m in session_memories)
+    repeated_failures = {p: c for p, c in failure_patterns.items() if c >= 2}
+
+    # 聚类：相同成功模式出现 ≥2 次 → 推荐实践
+    success_patterns = Counter(m["what_worked"] for m in session_memories)
+    repeated_successes = {p: c for p, c in success_patterns.items() if c >= 2}
+
+    global_entry = {
+        "run_id": run_id,
+        "timestamp": now_iso(),
+        "repeated_failures": repeated_failures,    # 触发进化机制
+        "repeated_successes": repeated_successes,  # 复用模式
+        "implicit_hints_that_mattered": [m for m in session_memories if m["implicit_hints"]],
+    }
+
+    append_to_jsonl("~/.hermes/goal-runs/global-learnings.jsonl", global_entry)
+    return global_entry
+```
+
+**global-learnings.jsonl 查询（在每次 Phase 1 开始前）：**
+
+```python
+# Phase 1 开始前，检查是否有相关全局记忆
+def check_global_learnings(goal_type):
+    learnings = read_jsonl("~/.hermes/goal-runs/global-learnings.jsonl")
+    relevant = [
+        l for l in learnings
+        if any(goal_type in str(v) for v in l["repeated_failures"].keys())
+    ]
+    if relevant:
+        warnings = [f"[global-learn] {l['repeated_failures']}" for l in relevant[-3:]]
+        inject_into_context("\n".join(warnings))
+```
+
+**与 Phase 6.1.7 的区别：**
+- 6.1.7 = **SKILL.md 级别的改进**（结构性变更）
+- 6.1.9 = **per-task pattern memory**（下次同类型任务可直接复用）
+
+---
+
+### 6.1.10 Rollout Persistence — 跨 Session 追踪
+
+**Session Log 格式（JSONL，每 turn 一行）：**
+
+```python
+# 每个 delegate_task 的每轮交互，记录：
+turn_log = {
+    "turn": 1,
+    "agent": "Claude Code",
+    "session_id": "calc-cli_abc123",
+    "goal_id": "calc-cli",
+    "timestamp": "2026-05-12T14:15:22+08:00",
+    "tool_calls": [
+        {"tool": "write_file", "args": {"path": "src/main.py"}, "result": "ok"},
+        {"tool": "terminal", "args": {"command": "pytest"}, "result": "3 passed"},
+    ],
+    "d_score_delta": None,      # 本 turn 对 D 分数的影响（事后填）
+    "pivot_triggered": False,  # 是否触发了 pivot
+    "blocker": None,           # 如果有阻塞，记录原因
+}
+```
+
+**持久化规则：**
+- 存储路径：`~/.hermes/goal-runs/<run_id>/session.log`
+- 每个 session 结束时写入（追加模式）
+- 支持离线分析：离线工具可读取 session.log 重建执行轨迹
+
+**用途：**
+- 重放：给定 `session.log`，可以重建完整的执行路径
+- 调试：找出是哪个 turn 引入的问题
+- D7 循环检测：检查同一 `tool_calls` 模式是否重复 N 次
+
+---
+
+### 6.1.11 Implicit Signal 监控 + Synthetic Test Cases
+
+**目的：** 捕捉"当时没说，但回头看是问题信号"的隐含信息。
+
+**隐式信号类型：**
+
+```python
+IMPLICIT_SIGNALS = {
+    # D5 隐式信号
+    "d5_agent_switches": "同一 task 内换了 2+ 次 agent → Agent Selection Matrix 有漏洞",
+    "d5_fallback_used": "触发了 Fallback 1/2 → Primary 选择可能不对",
+
+    # D7 隐式信号
+    "d7_same_tool_repeated": "同一 tool + 相同 args 重复 3+ 次 → 循环检测漏报",
+    "d7_no_progress_git": "3+ 个连续 session git diff 无变化 → 实际无进展",
+
+    # D8 隐式信号
+    "d8_regression": "本 run 的 d8_score 比前 3 条均值低 → 需要 alert",
+    "d8_user_handoff": "needs_human=True → D8 的人工介入项失分",
+}
+```
+
+**Synthetic Test Cases（从 aggregate.jsonl 自动生成）：**
+
+```python
+# 当 aggregate.jsonl ≥10 条时，自动生成 synthetic test case
+def generate_synthetic_test():
+    """
+    用历史数据中识别出的模式，构建一个假的 TASK 用于测试 /goal 能力边界。
+    不实际执行，只用于验证 /goal 的判断逻辑是否正确。
+    """
+    runs = read_jsonl("~/.hermes/goal-runs/aggregate.jsonl")
+
+    # 从历史数据提取 worst-case patterns
+    worst = sorted(runs, key=lambda r: r["d8_score"])[:3]
+
+    # 构建 synthetic task：故意包含 worst-case 模式的特征
+    synthetic = {
+        "goal": "REFACTOR: 跨模块 deep refactor（历史上 D5 最易失败的类型）",
+        "known_traps": [  # 已知陷阱来自历史
+            r["repeated_failures"] for r in worst
+        ],
+        "expected_agent": "Codex",  # 历史上正确的选择
+        "baseline_d8": worst[0]["d8_score"],
+    }
+
+    # 保存为 test fixture
+    save_json("~/.hermes/goal-runs/synthetic-tests/test_d5_deep_refactor.json", synthetic)
+    return synthetic
+```
+
+**Synthetic Test 在 CI 中的用法：**
+
+```bash
+# 定期运行 synthetic test，验证 /goal 决策逻辑
+# 不实际写代码，只验证决策（选对 agent / 不触发误判 / 正确计算 D8）
+
+pytest tests/test_goal_decisions.py  # 包含 synthetic test 验证
+```
+
+**Implicit Signal 注入到 Phase 1（预防）：**
+
+```
+在 Phase 1 开始时，检查 global-learnings.jsonl：
+  → 如果有 relevant repeated_failures，在 PLANS.md 中加一条：
+    "⚠️ 历史上这类任务容易失败，原因：[failure_pattern]。本次请注意。"
+```
+
+**Implicit Signal 注入到 Phase 6.1.9 consolidation（回溯）：**
+
+```
+在 Phase 2 consolidation 时，把本次被忽略的 warnings 记录下来：
+  → 如果这个 warning 之后变成了 blocker，记录到 implicit_hints_that_mattered
+  → 下次遇到类似 warning，提醒等级提高
+```
 
 ---
 
