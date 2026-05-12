@@ -1,0 +1,20 @@
+[
+  {
+    "id": 1,
+    "prompt": "/goal 实现一个命令行计算器，支持加减乘除和括号优先级，输出整洁的错误提示",
+    "expected": "可运行的 Python 脚本，支持 + - * / ( )，有输入验证，单元测试通过",
+    "baseline_expectation": "能跑但可能没有测试、没有错误处理、没有外部记忆文件"
+  },
+  {
+    "id": 2,
+    "prompt": "/goal 写一个博客爬虫，抓取指定目录页所有文章标题和链接，保存为 CSV",
+    "expected": "可运行的爬虫，有 robots.txt 检查，有 CSV 输出，有进度提示",
+    "baseline_expectation": "能抓但可能硬编码、没有容错、没有持久化"
+  },
+  {
+    "id": 3,
+    "prompt": "/goal 自动分析 ~/Hermes-Agent 项目的代码质量，输出报告",
+    "expected": "分析工具选择、代码行数统计、文件类型分布、有架构洞察，形成报告",
+    "baseline_expectation": "简单 ls/wc 统计，没有分析框架、没有结构化报告"
+  }
+]
