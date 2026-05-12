@@ -1,7 +1,7 @@
 ---
 name: goal
 description: Use when the user says "/goal" or wants to autonomously pursue a durable objective — equivalent to Codex /goal. Decomposes goals into milestones, dispatches agents, and enforces independent verification before marking complete.
-version: 2.5.1
+version: 2.6.0
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -499,6 +499,9 @@ WORKDIR/
 ```markdown
 # [Goal] — SPEC
 
+> **mode: greenfield**  <!-- greenfield=新功能大胆假设 | surgical=精准改动保守验证 -->
+> **scope: full**        <!-- full=完整实现 | minimal=最小可用 -->
+
 ## Goal
 [用户描述的目标]
 
@@ -810,21 +813,54 @@ test-related tasks（测试相关任务）：
 → 无论什么模式，都可以主动跑测试
 ```
 
+**量化判断：**
+```
+if mode == "never" or mode == "on-failure":
+    # 非交互 → 主动测试，不等用户
+    run_tests_unless_failure()
+elif mode == "untrusted" or mode == "on-request":
+    # 交互 → 先提案，等确认
+    propose_and_wait_for_confirmation()
+```
+
 ### 野心 vs 精度（上下文感知）
 
 ```
 任务类型不同，策略不同：
 
-新任务 / 无现有代码库约束：
+新任务 / 无现有代码库约束（SPEC.md mode: greenfield）：
 → 可以大胆创造、实验、提出新方案
 
-现有代码库 / 已有明确范围的任务：
+现有代码库 / 已有明确范围的任务（SPEC.md mode: surgical）：
 → 手术精度：用户要什么做什么，不要多做
 → 不要因为觉得"这样更好"就擅自改用户没要求的部分
 → 不要加"有用但不在 scope 里"的功能
 
 判断标准：这次改动是否让"用户要求的 end state"更接近？
 是 → 做；否 → 不做
+```
+
+**量化决策矩阵：**
+
+| SPEC mode | scope | 行为策略 | 改动阈值 |
+|-----------|-------|---------|---------|
+| `greenfield` | `full` | 大胆假设，主动建议新方案 | 任意有潜力的改进都尝试 |
+| `greenfield` | `minimal` | 大胆假设 + 快速验证 | 最小改动先跑通再说 |
+| `surgical` | `full` | 精准执行，scope 内做到极致 | scope 内全部覆盖，scope 外 0 容忍 |
+| `surgical` | `minimal` | 最小可用，scope 外 0 容忍 | 只做最低完成标准，边界不变动 |
+
+**判断伪代码：**
+```
+if spec_mode == "surgical":
+    # surgical 模式：scope 是硬边界
+    if改动_in_scope:
+        全力实现
+    else:
+        discard  # 哪怕很有价值也不做
+elif spec_mode == "greenfield":
+    # greenfield 模式：鼓励探索
+    if 改动_has_potential:
+        尝试
 ```
 
 ### Action Safety（行动前先 call out 风险）
@@ -899,6 +935,36 @@ Codex 之前错误地用"no registry tool calls"作为"应该停止"的启发式
 → 放弃这个改进，记录 "discard: 收益 < 1%"
 → 继续下一个方向
 ```
+
+**量化判断（每次改动后评估）：**
+
+```python
+def should_discard(change):
+    """
+    change: {delta_lines, delta_complexity, delta_requirement_match}
+    """
+    # 收益计算
+    benefit = change["delta_requirement_match"]  # 需求匹配率提升 (0.0-1.0)
+    # 成本计算
+    cost = change["delta_complexity"]  # 圈复杂度变化
+    lines = change["delta_lines"]      # 代码行数变化
+
+    # 收益/成本比
+    if cost > 0:
+        efficiency = benefit / cost
+    else:
+        efficiency = benefit  # 负成本（简化）= 直接保留
+
+    # Discard 阈值
+    if efficiency < 0.01 and lines > 20:
+        return "discard", f"收益 {benefit:.3f} / 成本 {cost} < 1%"
+    return "keep", f"efficiency={efficiency:.3f}"
+```
+
+**简单版判断（无需量化）：**
+- 这个改动"用户能看到"吗？→ 否 → discard
+- 改动 > 50 行但收益不确定 → discard
+- 不确定时 → 默认 discard（保守）
 
 ---
 
@@ -981,18 +1047,28 @@ hermes cronjob create \
 | Task Type | Primary | Fallback 1 | Fallback 2 |
 |-----------|---------|------------|------------|
 | Code implementation | Claude Code | Codex | OpenCode |
+| Deep refactor（跨模块重构） | Codex | Claude Code | OpenCode |
 | Visual/UI/审美 | Gemini CLI | Claude Code | — |
 | General/process/coordination | Hermes | — | — |
 | Script/automation | Codex | Claude Code | — |
+| Research/exploration（选型调研） | Gemini CLI | Hermes | — |
+| Security review | Claude Code | Codex | Hermes |
 
-#### B. Verifier 选择（≠ Implementer）
+> **注意：** "deep refactor" 行是 Round 4 案例教训（T4：Claude Code 3次失败，Codex 1次过），结构性修复不可依赖规则约束。
 
-| Implementer | 首选 Verifier | 备选 Verifier |
-|-------------|--------------|---------------|
-| Claude Code | Hermes | Gemini CLI |
-| Gemini CLI | Claude Code | Hermes |
-| Hermes | Claude Code | — |
-| Codex | Claude Code | Hermes |
+#### B. Verifier 选择（≠ Implementer + 能力匹配）
+
+| Implementer | 首选 Verifier | 备选 Verifier | 理由 |
+|-------------|--------------|---------------|------|
+| Claude Code | Hermes | Gemini CLI | Hermes 无 terminal → 纯审查视角 |
+| Gemini CLI | Claude Code | Hermes | Claude Code 有完整 terminal → 可跑测试 |
+| Hermes | Claude Code | — | 代码任务验证需要 terminal |
+| Codex | Claude Code | Hermes | 同上 |
+
+**选择原则：**
+1. **≠ Implementer**（强制）
+2. **有 terminal 能力的 agent 优先验证代码任务**（Claude Code > Codex > Hermes）
+3. **无 terminal 的 agent 适合纯审查/分析任务**
 
 **硬规则：Verifier ≠ Implementer。不同模型/Provider 强制执行。**
 
@@ -1656,12 +1732,126 @@ Phase 6 Delivery
     ↓
 Phase 6.1 Retrospective（自动，无需用户触发）
     ↓
+Phase 6.1.7 自动改进触发（核心：闭环形成）
+    ↓
 发送评估报告给用户
     ↓
 等待用户反馈（确认/修改建议）
     ↓
 如有修改意见 → 更新 SKILL.md（进入下一轮达尔文优化）
 ```
+
+---
+
+### 6.1.7 自动改进触发 — 进化闭环核心
+
+**目的：** 当同一类问题重复出现时，自动生成 SKILL.md patch 提案，而不是永远"等用户反馈"。
+
+**触发条件：** 同一 `dimension`（D1-D8）的 `improvement_suggestion` 在最近 N 次 run 中出现 ≥2 次。
+
+```python
+import json
+from pathlib import Path
+from collections import defaultdict
+
+aggregate_path = Path("~/.hermes/goal-runs/aggregate.jsonl").expanduser()
+runs = [json.loads(l) for l in aggregate_path.read_text().strip().split("\n") if l]
+
+# 统计每个 dimension 的建议出现次数
+dim_count = defaultdict(int)
+for run in runs[-10:]:  # 只看最近 10 条
+    for sugg in run.get("improvement_suggestions", []):
+        dim_count[sugg["dimension"]] += 1
+
+# 触发阈值
+THRESHOLD = 2
+triggered = {d: c for d, c in dim_count.items() if c >= THRESHOLD}
+```
+
+**如果 `triggered` 非空 → 自动生成 patch 提案：**
+
+```markdown
+## 自动改进提案
+检测到以下维度连续 ≥2 次出现改进建议：
+
+| Dimension | 出现次数 | 最近建议 | 建议 patch |
+|-----------|---------|---------|-----------|
+| D5 | 3次 | Agent Selection Matrix 对 deep refactor 分配不准 | +deep refactor 行 |
+| D3 | 2次 | 边界覆盖不足 | +API集成任务边界 |
+
+**自动生成 patch 指令：**
+\`\`\`
+Patch ~/.hermes/skills/software-development/goal/SKILL.md
+- old: "| Script/automation | Codex | Claude Code | — |"
+- new: "| Script/automation | Codex | Claude Code | — |\n| Deep refactor | Codex | Claude Code | OpenCode |"
+\`\`\`
+
+是否确认应用此 patch？回复"确认"立即执行。
+```
+
+**执行流程：**
+```
+检测到 triggered dims ≥ THRESHOLD
+    ↓
+生成 patch 指令（精确 old_string → new_string）
+    ↓
+发送给用户："检测到 D5 连续 3 次失利，是否自动 patch？"
+    ↓
+用户确认 "确认" → Hermes 自动 patch → 新 run 验证效果
+用户拒绝 → 记录 "rejected"，不阻塞
+用户修改 → 进入人工审核流程
+```
+
+**A/B 验证（D8 棘轮的验证层）：**
+
+当 patch 确认应用后，等待 3 个新 run，然后对比 D8 均值：
+
+```python
+# 获取 patch 前的 3 条数据
+before = runs[-6:-3]  # patch 前最近 3 条
+after  = runs[-3:]     # patch 后最近 3 条（需等待新 run）
+
+d8_before = statistics.mean([r["d8_score"] for r in before])
+d8_after  = statistics.mean([r["d8_score"] for r in after])
+
+if d8_after >= d8_before:
+    # 棘轮保留
+    pass
+else:
+    # 回归 → revert patch + 记录 regression
+    revert_patch(original_text)
+    log(f"REGRESSION: patch for D{dim} caused d8 {d8_before}→{d8_after}")
+```
+
+> **原则：** 没有验证的改进不是进化，是猜测。棘轮只保留被数据支持的改动。
+
+---
+
+### 6.1.8 D8 A/B 验证（棘轮验证层）
+
+D8 累积分数不仅是"分母记录"，还是**A/B 测试的评分变量**：
+
+```python
+# aggregate.jsonl 中每条 run 的 d8_score 是 A/B 测试的被解释变量
+# 当 SKILL 发生变更（通过 6.1.7 或人工），
+#   → 变更前：d8_before = mean(last 3 runs)
+#   → 变更后：d8_after  = mean(next 3 runs)
+#   → 决策：d8_after ≥ d8_before → 保留，反之 revert
+
+# 滑动窗口公式（当样本 ≥10 时）
+window = 5
+for i in range(len(runs) - window):
+    before = runs[i:i+window//2]
+    after  = runs[i+window//2:i+window]
+    delta  = mean(after["d8_score"]) - mean(before["d8_score"])
+    if delta < -0.5:  # 下降超过 0.5 分
+        alert_user(f"D8 regression detected: {delta:.1f}")
+```
+
+**阈值设定：**
+- `d8_after - d8_before ≥ 0` → 棘轮保留
+- `d8_after - d8_before < 0` → 立即 alert，等用户决策
+- `d8_after - d8_before ≥ +1` → 标记"显著改进"，优先复用此改动模式
 
 ---
 
