@@ -32,8 +32,19 @@ git -C ~/.hermes/skills/software-development/goal push origin main
 
 ## Changelog
 
+### v2.17.0 — 2026-05-17
+**autonomous-loop.py v2.17 预算精细化管理：**
+
+1. **`_estimate_max_turns()`**：任务开始前根据复杂度动态调整 max_turns
+   - 简单文件操作（fix/单文件/bug/convert）→ **5 turns**
+   - 复杂任务（调研/重构/CI-CD/多模块）→ **25 turns**
+   - 标准任务 → **15 turns**（默认）
+   - 替代之前的硬编码 `max_turns=15`
+
+2. **token 消耗预估**：complexity → budget 映射逻辑写在 `_estimate_max_turns()`，可独立复用
+
 ### v2.16.0 — 2026-05-17
-**autonomous-loop.py v2.16 核心优化（5 项改进）：**
+**autonomous-loop.py v2.16 核心优化（8 项改进）：**
 
 1. **Session 持久化**：pipe 文件从 `AGENT_LOG/{session}/output.txt`（workspace 内）改为 `LOG_DIR/sessions/{workspace_hash}_{session_name}.pipe`（LOG_DIR 内）。进程中断后 pipe 文件仍然存在，可恢复执行。
 
@@ -44,6 +55,12 @@ git -C ~/.hermes/skills/software-development/goal push origin main
 4. **B站选择器修复**：`.bili-video-card` 容器 + `lines[3]` 提取标题行（innerText 多行结构中第4行是标题），过滤 `· ` 开头噪声。
 
 5. **微博选择器修复**：`[node-type='feed_list_content']` 容器 + `.content_txt` 提取正文，去除用户名/时间等元信息噪声。
+
+6. **失败模式聚类（v2.16）**：Crash Guard 从 `{task_id: crash_count}` 升级为 `{task_id: {error_type: count}}`。每次 crash 时从输出提取错误类型指纹（python_syntax / network_timeout / permission / file_not_found / git_conflict / test_fail / exec_fail / oom 等），同类错误连续 3 次才触发 guard。不同错误类型分开计数，避免一种错误掩盖另一种。
+
+7. **三角并行预算精细化（v2.16）**：`run_triangular()` 的 3 个子 agent 现在使用动态 `max_turns`（由 `_estimate_max_turns(title, body)` 返回 5/15/25），而非原来统一用 15。复杂任务三角（标题含"架构"/"重设计"等关键词）用 25 turns。
+
+8. **goal-loop.jsonl 结构化日志（v2.16）**：`write_goal_result()` 同时写入 `goal-results.tsv`（人类可读）和 `goal-loop.jsonl`（结构化，JSON 每行）。jsonl 包含 `task_id / error_type / exec_ok / verify_ok / commit_ok` 等字段，方便后续分析失败模式、token 消耗和任务历史。
 
 ### v2.15.1 — 2026-05-17
 **autonomous-loop.py 小修：**
