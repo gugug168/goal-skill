@@ -28,9 +28,15 @@ git -C ~/.hermes/skills/software-development/goal push origin main
 git -C ~/.hermes/skills/software-development/goal add references/
 git -C ~/.hermes/skills/software-development/goal commit -m "goal-skill: update references"
 git -C ~/.hermes/skills/software-development/goal push origin main
-version: 2.15.0
+version: 2.15.1
 
 ## Changelog
+
+### v2.15.1 — 2026-05-17
+**autonomous-loop.py 小修：**
+- **DB 查询修复**：`updated_at` 列不存在，改用 `consecutive_failures` 过滤频繁失败任务（< 3 次）
+- **三角并行正则修复**：`\s` 改 `\\s`，避免 SyntaxWarning
+- **reset 测试修复**：mock dict.pop 返回 None 时 `== None` 判断失败（pop 返回 None 是正确行为）
 
 ### v2.15.0 — 2026-05-17
 **autonomous-loop.py v2.15 核心优化（5 项改进）：**
@@ -2364,7 +2370,7 @@ python3 ~/.hermes/skills/media/youtube-content/scripts/fetch_transcript.py "URL"
 | `claude-code` | Phase 3 — code implementation |
 | `codex` | Phase 3 — code implementation |
 | `gemini-cli` | Phase 3 — visual/审美 implementation |
-| `autonomous-dev-loop` | Phase 3 — cron-driven execution |
+| `autonomous-dev-loop` | Phase 3 — cron-driven execution + v2.15 triangle exact-match/crash-guard/task-id/progress-tracker |
 | `kanban-orchestrator` | Phase 2/3 — Kanban operations |
 | `finishing-a-development-branch` | Phase 5 — completion workflow |
 | `subagent-driven-development` | Per-task execution pattern |
