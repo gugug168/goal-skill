@@ -1,7 +1,7 @@
 ---
 name: goal
 description: Use when the user says "/goal" or wants to autonomously pursue a durable objective — equivalent to Codex /goal. Decomposes goals into milestones, dispatches agents, and enforces independent verification before marking complete.
-version: 2.7.0
+version: 2.13.0
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -29,6 +29,54 @@ git -C ~/.hermes/skills/software-development/goal add references/
 git -C ~/.hermes/skills/software-development/goal commit -m "goal-skill: update references"
 git -C ~/.hermes/skills/software-development/goal push origin main
 ```
+
+## Changelog
+
+### v2.12.0 — 2026-05-17
+**Crash Guard + Keep/Discard 逻辑细化：**
+- Autonomous-loop.py 新增 `_CRASH_COUNT` 去重保护：同一任务 3 次 crash → 标记 `needs-human`，停止自动重试
+- 新增 `needs-human` 状态：任务无法自动完成，需要人工介入
+- 状态转换规则：
+  - `exec_ok + verify_ok + commit_ok` → `keep`（goal-results.tsv）
+  - `exec_ok + verify_fail` → `discard`，降级 `todo`，下次重试
+  - `exec_fail + crash_guard_hit` → `crash`，标记 `needs-human`，停止重试
+  - `exec_fail + crash_guard_not_hit` → `crash`，降级 `todo`，下次重试
+- **三角并行检测**：TRIANGLE_TAGS = `["三角", "parallel", "impl+review+test", "t:implementation", "实现+审查+测试", "multi-agent"]`
+  - task body 或 assignee 含以上关键词 → 触发三角并行（3 agent 同时执行）
+  - 不含 → 标准单 agent 执行
+- **验收标准解析**（autonomous-loop.py `parse_acceptance_criteria`）：
+  - 格式：`- [ ] 文本` / `- [x] 文本` / `✓ 文本` / `✅ 文本`
+  - 无明确格式时 → `guess_criteria_from_title()` 推断（pytest/implement/fix/review 等关键词）
+  - 最终由 `verify_workspace()` 验证（文件存在/tsc/pytest/git diff）
+
+### v2.11.0 — 2026-05-17
+**视频能力集成：**
+- 新增 `video-download` skill（yt-dlp）：搜索+下载 YouTube/B站等平台视频
+- 新增 `youtube-content` skill：YouTube transcript 提取+总结
+- Skill Loading Order 新增 #9 `video-download`、#10 `youtube-content`
+- Autonomous Dev Loop cron job 重建（job_id: `7202cab8a127`，每5分钟调度）
+- Goal Feishu Listener cron job 正常运行（job_id: `3ce8e3b7cd36`）
+- `goal-manager.py` 支持 task-decomp 自动生成 subtasks（状态设为 `ready`，立即触发 autonomous-loop）
+
+### v2.10.0 — 2026-05-14
+**GLM 模型 + Anthropic 代理修复：**
+- 本地代理 `~/Scripts/anthropic_proxy.py` 将 `/v1/messages` 翻译为 `/chat/completions`
+- 修复 cc-switch 读错 token（不要从 `~/.mmx/config.json` 读 — 那是 MiniMax key）
+- 修复 `max_turns=15` 对标准任务更合适（之前用 5 导致多轮编辑被截断）
+- 修复 `HOME=/tmp/claude_clean_home` 在 tmux -c 场景导致 API 404 的问题
+- 修复 idle 检测误杀慢 API（`timeout > 600` 条件）
+- 新增 `goal-results.tsv` keep/discard/crash 结果追踪
+- 新增 `classify_task_complexity()` 任务复杂度分类（simple_direct/standard/complex）
+
+### v2.9.0 — 2026-05-13
+**三角并行 + 验收标准解析：**
+- `run_triangular()` 实现：自动识别三角任务，并行发到 3 个 agent
+- `parse_acceptance_criteria()` 强制解析 task body 里的 `- [ ]` / `✓` 格式
+- `verify_workspace()` 闭环验证（文件存在/pytest/tsc/commit）
+- 修复 `bash -c '...'` 单引号转义 bug（用临时脚本文件替代）
+- 修复 `NameError: agent_timeout not defined`（`run_claude_code_interactive()` 参数是 `timeout`）
+
+---
 
 GitHub 仓库：https://github.com/gugug168/goal-skill
 
@@ -104,6 +152,8 @@ Estimated scope: [big/small/medium]
 Agent assignment: Claude Code (code) / Gemini CLI (visual) / Hermes (general)
 Token budget: [unlimited / 50k / 100k / custom]  ← 设置则限，无设置则不限
 Ready to decompose? (Y/N)
+
+**Non-interactive / eval mode (GOAL_EVAL=1):** Auto-confirm → proceed directly to Phase 1.
 ```
 
 **Token Budget 说明：**
@@ -2156,6 +2206,32 @@ When this skill is invoked, load these skills in order:
 6. `autonomous-dev-loop` — cron-driven execution
 7. `kanban-orchestrator` — Kanban operations
 8. `finishing-a-development-branch` — completion workflow
+9. `video-download` — 视频搜索+下载（research 类任务需要时自动加载）
+10. `youtube-content` — YouTube 内容提取+总结（自媒体/研究任务需要时加载）
+11. `article-scraper` — 文章爬取+整理（知乎/公众号/小红书/Medium 等，research 任务需要时加载）
+
+### 视频能力集成
+
+goal 任务中如果涉及：
+- **视频资料研究**：自动使用 `youtube-content` 或 `video-download` 搜索+获取内容
+- **自媒体内容制作**：`video-production` pipeline（copywriting→配音→视觉规划→画面制作）
+- **视频下载**：直接调用 `yt-dlp`（`video-download` skill）
+
+用法示例：
+```
+/goal 搜索并总结 YouTube 上的 BIM AI 教程视频
+→ 自动加载 youtube-content skill
+→ 获取 transcript → 总结为结构化文档
+```
+
+```bash
+# 视频下载（via video-download skill）
+yt-dlp "URL" -o "~/Videos/%(title)s.%(ext)s"
+yt-dlp "URL" -x --audio-format mp3  # 仅音频
+
+# YouTube 内容提取（via youtube-content skill）
+python3 ~/.hermes/skills/media/youtube-content/scripts/fetch_transcript.py "URL" --text-only
+```
 
 ---
 
@@ -2169,6 +2245,10 @@ When this skill is invoked, load these skills in order:
 | 3 failures on same task | Switch agent, 2 more attempts, then mark "needs human" |
 | User interrupts cronjob | Resume from last checkpoint in TASK-过程记录.md |
 | Agent produces wrong thing | Verify against spec, not assumption |
+| claude -p API 404 in tmux | 检查 `HOME=/tmp/claude_clean_home` 是否被设置（破坏 tmux 里的 API 调用）；检查 cc-switch BASE_URL 是否为 `https://open.bigmodel.cn/api/anthropic/v1` |
+| cc-switch 智谱 API 欠费 | 模型改为 `glm-4.5-air`（`glm-5.1` 余额可能不足），URL 必须是 `/anthropic/v1`（不是 `/coding/paas/v4`） |
+| autonomous-loop idle 检测误杀 | 添加 `timeout > 600` 条件，防止慢 API 响应被误判为卡住 |
+| NameError: agent_timeout not defined | `run_claude_code_interactive()` 的函数参数是 `timeout`，idle 检测条件里应写 `timeout > 600` 而非 `agent_timeout > 600` |
 
 ---
 
