@@ -1,7 +1,7 @@
 ---
 name: goal
 description: Use when the user says "/goal" or wants to autonomously pursue a durable objective — equivalent to Codex /goal. Decomposes goals into milestones, dispatches agents, and enforces independent verification before marking complete.
-version: 2.15.0
+version: 2.16.0
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -28,9 +28,22 @@ git -C ~/.hermes/skills/software-development/goal push origin main
 git -C ~/.hermes/skills/software-development/goal add references/
 git -C ~/.hermes/skills/software-development/goal commit -m "goal-skill: update references"
 git -C ~/.hermes/skills/software-development/goal push origin main
-version: 2.15.1
+```
 
 ## Changelog
+
+### v2.16.0 — 2026-05-17
+**autonomous-loop.py v2.16 核心优化（5 项改进）：**
+
+1. **Session 持久化**：pipe 文件从 `AGENT_LOG/{session}/output.txt`（workspace 内）改为 `LOG_DIR/sessions/{workspace_hash}_{session_name}.pipe`（LOG_DIR 内）。进程中断后 pipe 文件仍然存在，可恢复执行。
+
+2. **中断恢复**：新增 `_save_loop_state()`/`_load_loop_state()`/`_clear_loop_state()` 状态管理。任务开始时写入 `task_id=running`，完成后清除。进程重启后自动清理残留 tmux session。
+
+3. **长任务飞书预警**：运行时间达到 360s（距 timeout 60s）时自动发送飞书提醒，只发一次。避免长任务静默超时无人知晓。
+
+4. **B站选择器修复**：`.bili-video-card` 容器 + `lines[3]` 提取标题行（innerText 多行结构中第4行是标题），过滤 `· ` 开头噪声。
+
+5. **微博选择器修复**：`[node-type='feed_list_content']` 容器 + `.content_txt` 提取正文，去除用户名/时间等元信息噪声。
 
 ### v2.15.1 — 2026-05-17
 **autonomous-loop.py 小修：**
